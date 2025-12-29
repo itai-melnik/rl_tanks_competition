@@ -47,11 +47,18 @@ MAP_DIAGONAL[GRID_SIZE - 1 - INNER_START, INNER_START] = 0
 MAP_DIAGONAL[GRID_SIZE - 1 - INNER_START, GRID_SIZE - 1 - INNER_START] = 0
 
 
+# Full map pool (enable gradually for curriculum learning)
+# MAP_POOL = {
+#     "empty": MAP_EMPTY,
+#     "cross": MAP_CROSS,
+#     "pillars": MAP_FOUR_PILLARS,
+#     "diagonal": MAP_DIAGONAL,
+# }
+
+# Start with simpler maps - add complex ones after agent learns basics
 MAP_POOL = {
     "empty": MAP_EMPTY,
-    "cross": MAP_CROSS,
-    "pillars": MAP_FOUR_PILLARS,
-    "diagonal": MAP_DIAGONAL
+    "pillars": MAP_FOUR_PILLARS,  # Pillars are easier than cross/diagonal
 }
 
 def get_random_map(rng):

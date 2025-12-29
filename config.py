@@ -1,34 +1,37 @@
 import torch
+from bots import BaseBot, RandomBot, AggressiveBot, CamperBot, EvadeBot
 
 # Random Seed (for reproducibility)
 SEED = 42
 
+
+
 # Training Hyperparameters
-NUM_EPISODES = 1000    # Total episodes to train
+NUM_EPISODES = 1500          # More episodes for harder bots
 MAX_STEPS_PER_EPISODE = 100  # Truncate episode after this many steps
 
-LEARNING_RATE = 1e-3
+LEARNING_RATE = 5e-4         # Lower LR for fine-tuning (was 1e-3)
 GAMMA = 0.99                 # Discount factor
-BATCH_SIZE = 64
-BUFFER_SIZE = 10000          # Replay buffer size
+BATCH_SIZE = 128
+BUFFER_SIZE = 50000          # Increased buffer size
 MIN_BUFFER_SIZE = 1000       # Minimum buffer size before training starts
 
 # Epsilon Greedy Schedule
-EPS_START = 1.0
-EPS_END = 0.05
-EPS_DECAY = 0.9999           # Decay rate per episode (multiplicative)
+EPS_START = 0.3              # Lower start - agent already knows basics
+EPS_END = 0.05               # Lower final epsilon for more exploitation
+EPS_DECAY = 0.999            # Decay rate per episode (multiplicative)
 # Or linear decay steps:
-EPS_DECAY_STEPS = 1000       # Decay linearly over this many episodes (alternative)
+EPS_DECAY_STEPS = 1000       # Decay over most of training
 
 # DQN Specifics
-TARGET_UPDATE_FREQ = 100     # Update target network every N episodes (or steps)
+TARGET_UPDATE_FREQ = 500     # More stable target updates
 TRAIN_FREQ = 1               # Train every N steps (or episodes)
 
 # Visualization (pygame)
 # When True, train.py and evaluate.py will render the environment using pygame.
 # Default is False for fast, headless training/evaluation; enable manually
 # when you want to inspect behavior visually.
-USE_PYGAME_RENDER = True
+USE_PYGAME_RENDER = False
 
 # Checkpointing
 LOAD_CHECKPOINT = True  # Set to True to resume training from agent.pt

@@ -5,7 +5,7 @@ import torch.nn.functional as F
 # Student Editable: Network Architecture
 # You can change the number of neurons and add layers (e.g. [128, 128, 64])
 # Constraints: Max 3 hidden layers, max 256 neurons per layer.
-HIDDEN_SIZES = [32, 32]
+HIDDEN_SIZES = [256, 256, 128]
 
 class DQN(nn.Module):
     def __init__(self, obs_dim, action_dim, hidden_sizes=None):

@@ -21,18 +21,26 @@ def compute_reward(prev_state, curr_state, events):
     
     # Win/Loss
     if events['winner'] == 'me':
-        reward += 50.0
+        reward += 100.0
     elif events['winner'] == 'enemy':
-        reward -= 50.0
+        reward -= 100.0
         
     # Damage dealt/received
     if events['hit_enemy']:
-        reward += 10.0
+        reward += 5
     if events['hit_by_enemy']:
-        reward -= 10.0
+        reward -= 2
+
+    # Ammo management
+    prev_ammo = prev_state['me'].get('ammo', 0)
+    curr_ammo = curr_state['me'].get('ammo', 0)
+
+
+    # If ammo decreased AND we didn't hit the enemy -> We missed.
+    if curr_ammo < prev_ammo and not events['hit_enemy']:
+        reward -= 0.5  # Small penalty for wasting bullets
         
-    # Time penalty to encourage faster wins
-    reward -= 0.01
+
     
     # Distance shaping (optional baseline)
     # Reward for getting closer to enemy
@@ -40,11 +48,27 @@ def compute_reward(prev_state, curr_state, events):
                 abs(prev_state['me']['y'] - prev_state['enemy']['y'])
     curr_dist = abs(curr_state['me']['x'] - curr_state['enemy']['x']) + \
                 abs(curr_state['me']['y'] - curr_state['enemy']['y'])
-                
-    if curr_dist < prev_dist:
-        reward += 0.02
-    elif curr_dist > prev_dist:
-        reward -= 0.02
+    
+
+    if curr_ammo > 0:
+        # Aggressive Mode: Reward closing the gap
+        if curr_dist < prev_dist:
+            reward += 0.05
+        elif curr_dist > prev_dist:
+            reward -= 0.05
+    else:
+        # Defensive Mode: Penalize getting closer while helpless
+        if curr_dist < prev_dist:
+            reward -= 0.05
+
+    # Time penalty to encourage faster wins
+    reward -= 0.01
+
+
+    # if curr_dist < prev_dist:
+    #     reward += 0.02
+    # elif curr_dist > prev_dist:
+    #     reward -= 0.02
         
     return reward
 

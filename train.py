@@ -51,6 +51,12 @@ def main():
 
     # 3. Agents
     policy_net = DQN(obs_dim, action_dim, HIDDEN_SIZES).to(config.DEVICE)
+    
+    # Load checkpoint if enabled and exists
+    if getattr(config, "LOAD_CHECKPOINT", False) and os.path.exists(config.MODEL_SAVE_PATH):
+        logger.info(f"Loading checkpoint from {config.MODEL_SAVE_PATH}")
+        policy_net.load_state_dict(torch.load(config.MODEL_SAVE_PATH, map_location=config.DEVICE))
+    
     target_net = DQN(obs_dim, action_dim, HIDDEN_SIZES).to(config.DEVICE)
     target_net.load_state_dict(policy_net.state_dict())
     

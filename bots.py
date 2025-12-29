@@ -188,14 +188,12 @@ class EvadeBot(BaseBot):
         else:
             return DIR_DOWN if dy > 0 else DIR_UP  # y increases down
 
-# Phase 2: Add easy bots (RandomBot, EvadeBot)
-# Phase 3: Uncomment CamperBot
-# Phase 4: Uncomment AggressiveBot
+# Phase 4: ALL BOTS ENABLED ✓
 BOT_POOL = {
     "base": BaseBot(),
     "random": RandomBot(),
-    #"aggressive": AggressiveBot(),
-    #"camper": CamperBot(),
+    "aggressive": AggressiveBot(),  # Hardest: chases, shoots, shields
+    "camper": CamperBot(),
     "evade": EvadeBot(),
 }
 

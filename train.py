@@ -175,6 +175,16 @@ def main():
                 f"Win rate (last {len(recent_wins)}): {win_rate:.1f}% | "
                 f"Epsilon: {epsilon:.2f} | Steps: {global_step}"
             )
+        
+        # Save checkpoint to league folder for self-play diversity
+        # (every 300 episodes, save a snapshot for the league)
+        league_dir = os.path.join(config.CHECKPOINT_DIR, "league")
+        if (episode + 1) % 300 == 0:
+            os.makedirs(league_dir, exist_ok=True)
+            league_path = os.path.join(league_dir, f"agent_ep{episode+1}.pt")
+            torch.save(policy_net.state_dict(), league_path)
+            # Also update the main checkpoint for dynamic reload
+            torch.save(policy_net.state_dict(), config.MODEL_SAVE_PATH)
             
     # 5. Save
     logger.info(f"Training complete. Saving to {config.MODEL_SAVE_PATH}")

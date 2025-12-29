@@ -1,4 +1,10 @@
+import numpy as np
+import torch
+import os
+import json
+from model import DQN
 from constants import *
+
 
 class BaseBot:
     def act(self, state, rng):
@@ -188,13 +194,472 @@ class EvadeBot(BaseBot):
         else:
             return DIR_DOWN if dy > 0 else DIR_UP  # y increases down
 
-# Phase 4: ALL BOTS ENABLED ✓
+
+class SelfPlayBot(BaseBot):
+    """
+    Bot that uses a trained agent's policy.
+    Converts state to observation from its own perspective (swapping me/enemy).
+    Periodically reloads the model to pick up the latest trained version.
+    """
+    
+    def __init__(self, model_path="checkpoints/agent.pt", device="cpu", reload_every=500):
+        self.device = device
+        self.model = None
+        self.model_path = model_path
+        self.config_path = "checkpoints/model_config.json"
+        self.reload_every = reload_every  # Reload model every N actions
+        self.action_count = 0
+        self.last_mtime = 0  # Track file modification time
+        
+        self._load_model()
+    
+    def _load_model(self):
+        """Load or reload the model from disk."""
+        if os.path.exists(self.model_path) and os.path.exists(self.config_path):
+            try:
+                # Check if file has been updated
+                current_mtime = os.path.getmtime(self.model_path)
+                
+                with open(self.config_path, 'r', encoding='utf-8') as f:
+                    model_config = json.load(f)
+                
+                self.model = DQN(
+                    model_config["obs_dim"],
+                    model_config["action_dim"],
+                    model_config["hidden_sizes"]
+                )
+                self.model.load_state_dict(torch.load(self.model_path, map_location=self.device))
+                self.model.eval()
+                self.last_mtime = current_mtime
+            except (OSError, KeyError, RuntimeError) as e:
+                if self.model is None:
+                    print(f"SelfPlayBot: Could not load model: {e}")
+    
+    def act(self, state, rng):
+        self.action_count += 1
+        
+        # Periodically check if model file has been updated
+        if self.action_count % self.reload_every == 0:
+            try:
+                current_mtime = os.path.getmtime(self.model_path)
+                if current_mtime > self.last_mtime:
+                    self._load_model()  # Reload if file changed
+            except OSError:
+                pass
+        if self.model is None:
+            # Fallback to aggressive behavior if model not loaded
+            return AggressiveBot().act(state, rng)
+        
+        # Convert state to observation from THIS bot's perspective
+        # (swap me/enemy since this bot IS the enemy from env's view)
+        obs = self._state_to_obs(state)
+        
+        with torch.no_grad():
+            obs_tensor = torch.tensor(obs, dtype=torch.float32, device=self.device).unsqueeze(0)
+            q_values = self.model(obs_tensor)
+            return q_values.argmax().item()
+    
+    def _state_to_obs(self, state):
+        """
+        Convert state to observation from this bot's perspective.
+        This bot is 'enemy' in the state, so we swap me/enemy.
+        """
+        
+        # From this bot's POV: I am 'enemy', opponent is 'me'
+        me = state['enemy']      # This bot
+        enemy = state['me']      # The opponent (player)
+        grid = state['grid']
+        bullets = state['bullets']
+        
+        gs = GRID_SIZE - 1.0
+        obs = []
+        
+        # Me (this bot): x, y, dir(onehot), hp, cooldown, ammo, reload, shield_active, shield_cooldown
+        obs.extend([me['x']/gs, me['y']/gs])
+        d_onehot = [0]*4
+        d_onehot[me['dir']] = 1
+        obs.extend(d_onehot)
+        
+        me_hp = max(0, min(MAX_HP, me['hp']))
+        obs.append(me_hp/float(MAX_HP))
+        obs.append(me.get('cooldown', 0)/float(GUN_COOLDOWN_STEPS))
+        obs.append(me.get('ammo', MAX_AMMO)/float(MAX_AMMO))
+        obs.append(me.get('reload', 0)/float(RELOAD_STEPS))
+        me_shield_active = 1.0 if me.get('shield_steps', 0) > 0 else 0.0
+        me_shield_cd = me.get('shield_cooldown', 0)
+        obs.append(me_shield_active)
+        obs.append(me_shield_cd/float(SHIELD_COOLDOWN_STEPS))
+        
+        # Enemy (the player): x, y, dir(onehot), hp, shield_active
+        obs.extend([enemy['x']/gs, enemy['y']/gs])
+        e_d_onehot = [0]*4
+        e_d_onehot[enemy['dir']] = 1
+        obs.extend(e_d_onehot)
+        enemy_hp = max(0, min(MAX_HP, enemy['hp']))
+        obs.append(enemy_hp/float(MAX_HP))
+        enemy_shield_active = 1.0 if enemy.get('shield_steps', 0) > 0 else 0.0
+        obs.append(enemy_shield_active)
+        
+        # Relative position (from this bot's view)
+        obs.append((enemy['x'] - me['x']) / gs)
+        obs.append((enemy['y'] - me['y']) / gs)
+        dist = abs(enemy['x'] - me['x']) + abs(enemy['y'] - me['y'])
+        obs.append(dist / (2*gs))
+        
+        # Raycasts from this bot's position
+        obs.extend(self._raycast(me['x'], me['y'], me['dir'], enemy, grid))
+        obs.extend(self._raycast(me['x'], me['y'], (me['dir']-1)%4, enemy, grid))
+        obs.extend(self._raycast(me['x'], me['y'], (me['dir']+1)%4, enemy, grid))
+        
+        # Bullet danger (from this bot's perspective - enemy bullets are from 'me' owner)
+        danger_front, danger_left, danger_right = self._compute_bullet_danger(
+            me, bullets, grid, owner_to_fear='me'  # Fear bullets from 'me' (the player)
+        )
+        obs.extend([danger_front, danger_left, danger_right])
+        
+        return np.array(obs, dtype=np.float32)
+    
+    def _raycast(self, x, y, direction, enemy, grid):
+        """Raycast from position in direction, return [dist_to_wall, is_enemy_visible]."""
+        cx, cy = x, y
+        dist = 0
+        found_enemy = False
+        
+        while True:
+            cx += DX[direction]
+            cy += DY[direction]
+            dist += 1
+            
+            if not (0 <= cx < GRID_SIZE and 0 <= cy < GRID_SIZE):
+                break
+            if grid[cy, cx] == 1:
+                break
+            if cx == enemy['x'] and cy == enemy['y']:
+                found_enemy = True
+                break
+        
+        return [dist / GRID_SIZE, 1.0 if found_enemy else 0.0]
+    
+    def _compute_bullet_danger(self, me, bullets, grid, owner_to_fear):
+        """Compute bullet danger from this bot's perspective."""
+        mx, my = me['x'], me['y']
+        danger_front = 0.0
+        danger_left = 0.0
+        danger_right = 0.0
+        max_dist = max(1.0, GRID_SIZE - 1.0)
+        
+        for b in bullets:
+            if b.get('owner') != owner_to_fear:
+                continue
+            
+            bx, by = b['x'], b['y']
+            dx = bx - mx
+            dy = by - my
+            
+            if dx != 0 and dy != 0:
+                continue
+            
+            blocked = False
+            dist = None
+            dir_to_bullet = None
+            
+            if b['dir'] == DIR_RIGHT:
+                if dy != 0 or dx >= 0:
+                    continue
+                dist = -dx
+                for x in range(bx + 1, mx):
+                    if grid[my, x] == 1:
+                        blocked = True
+                        break
+                dir_to_bullet = DIR_LEFT
+            elif b['dir'] == DIR_LEFT:
+                if dy != 0 or dx <= 0:
+                    continue
+                dist = dx
+                for x in range(mx + 1, bx):
+                    if grid[my, x] == 1:
+                        blocked = True
+                        break
+                dir_to_bullet = DIR_RIGHT
+            elif b['dir'] == DIR_DOWN:
+                if dx != 0 or dy >= 0:
+                    continue
+                dist = -dy
+                for y in range(by + 1, my):
+                    if grid[y, mx] == 1:
+                        blocked = True
+                        break
+                dir_to_bullet = DIR_UP
+            elif b['dir'] == DIR_UP:
+                if dx != 0 or dy <= 0:
+                    continue
+                dist = dy
+                for y in range(my + 1, by):
+                    if grid[y, mx] == 1:
+                        blocked = True
+                        break
+                dir_to_bullet = DIR_DOWN
+            else:
+                continue
+            
+            if blocked or dist is None or dist <= 0:
+                continue
+            
+            rel = (dir_to_bullet - me['dir']) % 4
+            
+            if rel == 0:
+                slot = 'front'
+            elif rel == 1:
+                slot = 'right'
+            elif rel == 3:
+                slot = 'left'
+            else:
+                continue
+            
+            danger = max(0.0, 1.0 - float(dist) / max_dist)
+            
+            if slot == 'front' and danger > danger_front:
+                danger_front = danger
+            elif slot == 'left' and danger > danger_left:
+                danger_left = danger
+            elif slot == 'right' and danger > danger_right:
+                danger_right = danger
+        
+        return danger_front, danger_left, danger_right
+
+
+class LeagueBot(BaseBot):
+    """
+    Bot that randomly selects from a pool of saved agent versions.
+    Creates diverse opponents from past training checkpoints.
+    """
+    
+    def __init__(self, league_dir="checkpoints/league/", device="cpu"):
+        self.device = device
+        self.league_dir = league_dir
+        self.config_path = "checkpoints/model_config.json"
+        self.agents = []
+        self.current_agent_idx = None
+        self.episodes_with_current = 0
+        self.switch_every = 5  # Switch opponent every N episodes
+        
+        self._load_league()
+    
+    def _load_league(self):
+        """Load all agent versions from the league directory."""
+        if not os.path.exists(self.league_dir) or not os.path.exists(self.config_path):
+            return
+        
+        with open(self.config_path, 'r', encoding='utf-8') as f:
+            model_config = json.load(f)
+        
+        for filename in sorted(os.listdir(self.league_dir)):
+            if filename.endswith('.pt'):
+                try:
+                    model = DQN(
+                        model_config["obs_dim"],
+                        model_config["action_dim"],
+                        model_config["hidden_sizes"]
+                    )
+                    model.load_state_dict(torch.load(
+                        os.path.join(self.league_dir, filename),
+                        map_location=self.device
+                    ))
+                    model.eval()
+                    self.agents.append((filename, model))
+                except (OSError, KeyError, RuntimeError):
+                    pass
+        
+        if self.agents:
+            print(f"LeagueBot: Loaded {len(self.agents)} agents from {self.league_dir}")
+    
+    def act(self, state, rng):
+        if not self.agents:
+            # Fallback to AggressiveBot if no league agents
+            return AggressiveBot().act(state, rng)
+        
+        # Pick a random agent periodically
+        if self.current_agent_idx is None:
+            self.current_agent_idx = rng.integers(0, len(self.agents))
+        
+        _, model = self.agents[self.current_agent_idx]
+        obs = self._state_to_obs(state)
+        
+        with torch.no_grad():
+            obs_tensor = torch.tensor(obs, dtype=torch.float32, device=self.device).unsqueeze(0)
+            q_values = model(obs_tensor)
+            return q_values.argmax().item()
+    
+    def reset_opponent(self, rng):
+        """Call this at episode start to potentially switch opponents."""
+        self.episodes_with_current += 1
+        if self.episodes_with_current >= self.switch_every and self.agents:
+            self.current_agent_idx = rng.integers(0, len(self.agents))
+            self.episodes_with_current = 0
+    
+    def _state_to_obs(self, state):
+        """Convert state to observation from this bot's perspective (same as SelfPlayBot)."""
+        me = state['enemy']
+        enemy = state['me']
+        grid = state['grid']
+        bullets = state['bullets']
+        
+        gs = GRID_SIZE - 1.0
+        obs = []
+        
+        obs.extend([me['x']/gs, me['y']/gs])
+        d_onehot = [0]*4
+        d_onehot[me['dir']] = 1
+        obs.extend(d_onehot)
+        
+        me_hp = max(0, min(MAX_HP, me['hp']))
+        obs.append(me_hp/float(MAX_HP))
+        obs.append(me.get('cooldown', 0)/float(GUN_COOLDOWN_STEPS))
+        obs.append(me.get('ammo', MAX_AMMO)/float(MAX_AMMO))
+        obs.append(me.get('reload', 0)/float(RELOAD_STEPS))
+        me_shield_active = 1.0 if me.get('shield_steps', 0) > 0 else 0.0
+        me_shield_cd = me.get('shield_cooldown', 0)
+        obs.append(me_shield_active)
+        obs.append(me_shield_cd/float(SHIELD_COOLDOWN_STEPS))
+        
+        obs.extend([enemy['x']/gs, enemy['y']/gs])
+        e_d_onehot = [0]*4
+        e_d_onehot[enemy['dir']] = 1
+        obs.extend(e_d_onehot)
+        enemy_hp = max(0, min(MAX_HP, enemy['hp']))
+        obs.append(enemy_hp/float(MAX_HP))
+        enemy_shield_active = 1.0 if enemy.get('shield_steps', 0) > 0 else 0.0
+        obs.append(enemy_shield_active)
+        
+        obs.append((enemy['x'] - me['x']) / gs)
+        obs.append((enemy['y'] - me['y']) / gs)
+        dist = abs(enemy['x'] - me['x']) + abs(enemy['y'] - me['y'])
+        obs.append(dist / (2*gs))
+        
+        obs.extend(self._raycast(me['x'], me['y'], me['dir'], enemy, grid))
+        obs.extend(self._raycast(me['x'], me['y'], (me['dir']-1)%4, enemy, grid))
+        obs.extend(self._raycast(me['x'], me['y'], (me['dir']+1)%4, enemy, grid))
+        
+        danger_front, danger_left, danger_right = self._compute_bullet_danger(
+            me, bullets, grid, owner_to_fear='me'
+        )
+        obs.extend([danger_front, danger_left, danger_right])
+        
+        return np.array(obs, dtype=np.float32)
+    
+    def _raycast(self, x, y, direction, enemy, grid):
+        cx, cy = x, y
+        dist = 0
+        found_enemy = False
+        
+        while True:
+            cx += DX[direction]
+            cy += DY[direction]
+            dist += 1
+            
+            if not (0 <= cx < GRID_SIZE and 0 <= cy < GRID_SIZE):
+                break
+            if grid[cy, cx] == 1:
+                break
+            if cx == enemy['x'] and cy == enemy['y']:
+                found_enemy = True
+                break
+        
+        return [dist / GRID_SIZE, 1.0 if found_enemy else 0.0]
+    
+    def _compute_bullet_danger(self, me, bullets, grid, owner_to_fear):
+        mx, my = me['x'], me['y']
+        danger_front = 0.0
+        danger_left = 0.0
+        danger_right = 0.0
+        max_dist = max(1.0, GRID_SIZE - 1.0)
+        
+        for b in bullets:
+            if b.get('owner') != owner_to_fear:
+                continue
+            
+            bx, by = b['x'], b['y']
+            dx = bx - mx
+            dy = by - my
+            
+            if dx != 0 and dy != 0:
+                continue
+            
+            blocked = False
+            dist = None
+            dir_to_bullet = None
+            
+            if b['dir'] == DIR_RIGHT:
+                if dy != 0 or dx >= 0:
+                    continue
+                dist = -dx
+                for check_x in range(bx + 1, mx):
+                    if grid[my, check_x] == 1:
+                        blocked = True
+                        break
+                dir_to_bullet = DIR_LEFT
+            elif b['dir'] == DIR_LEFT:
+                if dy != 0 or dx <= 0:
+                    continue
+                dist = dx
+                for check_x in range(mx + 1, bx):
+                    if grid[my, check_x] == 1:
+                        blocked = True
+                        break
+                dir_to_bullet = DIR_RIGHT
+            elif b['dir'] == DIR_DOWN:
+                if dx != 0 or dy >= 0:
+                    continue
+                dist = -dy
+                for check_y in range(by + 1, my):
+                    if grid[check_y, mx] == 1:
+                        blocked = True
+                        break
+                dir_to_bullet = DIR_UP
+            elif b['dir'] == DIR_UP:
+                if dx != 0 or dy <= 0:
+                    continue
+                dist = dy
+                for check_y in range(my + 1, by):
+                    if grid[check_y, mx] == 1:
+                        blocked = True
+                        break
+                dir_to_bullet = DIR_DOWN
+            else:
+                continue
+            
+            if blocked or dist is None or dist <= 0:
+                continue
+            
+            rel = (dir_to_bullet - me['dir']) % 4
+            
+            if rel == 0:
+                slot = 'front'
+            elif rel == 1:
+                slot = 'right'
+            elif rel == 3:
+                slot = 'left'
+            else:
+                continue
+            
+            danger = max(0.0, 1.0 - float(dist) / max_dist)
+            
+            if slot == 'front' and danger > danger_front:
+                danger_front = danger
+            elif slot == 'left' and danger > danger_left:
+                danger_left = danger
+            elif slot == 'right' and danger > danger_right:
+                danger_right = danger
+        
+        return danger_front, danger_left, danger_right
+
+
+# Phase 5: SELF-PLAY + LEAGUE
+# Mix of bots for diverse training
 BOT_POOL = {
-    "base": BaseBot(),
-    "random": RandomBot(),
-    "aggressive": AggressiveBot(),  # Hardest: chases, shoots, shields
-    "camper": CamperBot(),
-    "evade": EvadeBot(),
+    "aggressive": AggressiveBot(),   # Heuristic baseline
+    "selfplay": SelfPlayBot(),       # Current agent snapshot (reloads periodically)
+    "league": LeagueBot(),           # Past agent versions
 }
 
 

@@ -31,7 +31,7 @@ TRAIN_FREQ = 1               # Train every N steps (or episodes)
 # When True, train.py and evaluate.py will render the environment using pygame.
 # Default is False for fast, headless training/evaluation; enable manually
 # when you want to inspect behavior visually.
-USE_PYGAME_RENDER = False
+USE_PYGAME_RENDER = True
 
 # Checkpointing
 LOAD_CHECKPOINT = True  # Set to True to resume training from agent.pt

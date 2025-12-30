@@ -6,22 +6,22 @@ SEED = 42
 
 
 
-# Training Hyperparameters - Phase 5 (Self-Play + League)
-NUM_EPISODES = 2500          # More episodes for diverse opponents
+# Training Hyperparameters - Phase 5b (Balanced Self-Play)
+NUM_EPISODES = 1500          # Moderate - don't overtrain
 MAX_STEPS_PER_EPISODE = 100  # Truncate episode after this many steps
 
-LEARNING_RATE = 3e-4         # Slightly higher - need to adapt to new play styles
+LEARNING_RATE = 2e-4         # Conservative - preserve existing skills
 GAMMA = 0.99                 # Discount factor
 BATCH_SIZE = 128
 BUFFER_SIZE = 100000         # Large buffer
 MIN_BUFFER_SIZE = 2000       # Warmup before training
 
 # Epsilon Greedy Schedule
-EPS_START = 0.25             # More exploration - self-play needs experimentation
+EPS_START = 0.15             # Lower exploration - agent is already good
 EPS_END = 0.05               # Low final epsilon
 EPS_DECAY = 0.999            # Decay rate per episode (multiplicative)
 # Or linear decay steps:
-EPS_DECAY_STEPS = 2000       # Slower decay - more time to explore counter-strategies
+EPS_DECAY_STEPS = 1200       # Moderate decay
 
 # DQN Specifics
 TARGET_UPDATE_FREQ = 500     # More stable target updates

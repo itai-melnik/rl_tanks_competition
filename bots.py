@@ -654,12 +654,19 @@ class LeagueBot(BaseBot):
         return danger_front, danger_left, danger_right
 
 
-# Phase 5: SELF-PLAY + LEAGUE
-# Mix of bots for diverse training
+# Phase 5b: BALANCED SELF-PLAY
+# Keep heuristic bots (prevents forgetting) + add self-play as bonus
+# Distribution: ~71% heuristic bots, ~29% self-play variants
 BOT_POOL = {
-    "aggressive": AggressiveBot(),   # Heuristic baseline
-    "selfplay": SelfPlayBot(),       # Current agent snapshot (reloads periodically)
-    "league": LeagueBot(),           # Past agent versions
+    # Heuristic bots (5 bots = 71%)
+    "base": BaseBot(),
+    "random": RandomBot(),
+    "aggressive": AggressiveBot(),   # Key opponent - don't forget this!
+    "camper": CamperBot(),
+    "evade": EvadeBot(),
+    # Self-play variants (2 bots = 29%)
+    "selfplay": SelfPlayBot(),       # Current agent (reloads when file changes)
+    "league": LeagueBot(),           # Past versions for diversity
 }
 
 

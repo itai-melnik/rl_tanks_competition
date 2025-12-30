@@ -195,6 +195,293 @@ class EvadeBot(BaseBot):
             return DIR_DOWN if dy > 0 else DIR_UP  # y increases down
 
 
+# ============================================================================
+# CHALLENGE BOTS (for evaluation only - not in training pool)
+# ============================================================================
+
+class SniperBot(BaseBot):
+    """
+    Stays at range, only shoots with perfect alignment.
+    Backs up if enemy gets too close.
+    """
+    
+    def act(self, state, rng):
+        me = state['me']
+        enemy = state['enemy']
+        grid = state['grid']
+        
+        # If enemy can hit us and shield is ready, use it
+        if self._can_use_shield(me) and self._enemy_can_hit_me(me, enemy, grid):
+            return ACTION_SHIELD
+        
+        # Check distance
+        dist = abs(enemy['x'] - me['x']) + abs(enemy['y'] - me['y'])
+        
+        # If we have a clear shot and can shoot, take it
+        if self._can_hit_enemy(me, enemy, grid) and self._can_shoot(me):
+            return ACTION_SHOOT
+        
+        # If too close (< 4 tiles), back up
+        if dist < 4:
+            back_dir = (me['dir'] + 2) % 4
+            nx = me['x'] + DX[back_dir]
+            ny = me['y'] + DY[back_dir]
+            if 0 <= nx < GRID_SIZE and 0 <= ny < GRID_SIZE and grid[ny, nx] == 0:
+                return ACTION_MOVE_BACKWARD
+        
+        # Turn to face enemy for sniping
+        target_dir = self._get_dir_to(me['x'], me['y'], enemy['x'], enemy['y'])
+        if me['dir'] != target_dir:
+            diff = (target_dir - me['dir']) % 4
+            if diff == 1:
+                return ACTION_TURN_RIGHT
+            else:
+                return ACTION_TURN_LEFT
+        
+        # Stay put and wait for shot
+        return ACTION_DO_NOTHING
+    
+    def _can_hit_enemy(self, me, enemy, grid):
+        if me['dir'] == DIR_UP:
+            if me['x'] == enemy['x'] and me['y'] > enemy['y']:
+                for y in range(enemy['y'] + 1, me['y']):
+                    if grid[y, me['x']] == 1:
+                        return False
+                return True
+        elif me['dir'] == DIR_DOWN:
+            if me['x'] == enemy['x'] and me['y'] < enemy['y']:
+                for y in range(me['y'] + 1, enemy['y']):
+                    if grid[y, me['x']] == 1:
+                        return False
+                return True
+        elif me['dir'] == DIR_LEFT:
+            if me['y'] == enemy['y'] and me['x'] > enemy['x']:
+                for x in range(enemy['x'] + 1, me['x']):
+                    if grid[me['y'], x] == 1:
+                        return False
+                return True
+        elif me['dir'] == DIR_RIGHT:
+            if me['y'] == enemy['y'] and me['x'] < enemy['x']:
+                for x in range(me['x'] + 1, enemy['x']):
+                    if grid[me['y'], x] == 1:
+                        return False
+                return True
+        return False
+    
+    def _enemy_can_hit_me(self, me, enemy, grid):
+        # Check if enemy is aligned and facing us
+        if enemy['dir'] == DIR_UP and enemy['x'] == me['x'] and enemy['y'] > me['y']:
+            for y in range(me['y'] + 1, enemy['y']):
+                if grid[y, me['x']] == 1:
+                    return False
+            return True
+        elif enemy['dir'] == DIR_DOWN and enemy['x'] == me['x'] and enemy['y'] < me['y']:
+            for y in range(enemy['y'] + 1, me['y']):
+                if grid[y, me['x']] == 1:
+                    return False
+            return True
+        elif enemy['dir'] == DIR_LEFT and enemy['y'] == me['y'] and enemy['x'] > me['x']:
+            for x in range(me['x'] + 1, enemy['x']):
+                if grid[me['y'], x] == 1:
+                    return False
+            return True
+        elif enemy['dir'] == DIR_RIGHT and enemy['y'] == me['y'] and enemy['x'] < me['x']:
+            for x in range(enemy['x'] + 1, me['x']):
+                if grid[me['y'], x] == 1:
+                    return False
+            return True
+        return False
+    
+    def _can_shoot(self, tank):
+        return (
+            tank.get("cooldown", 0) == 0
+            and tank.get("ammo", 0) > 0
+            and tank.get("reload", 0) == 0
+        )
+    
+    def _can_use_shield(self, tank):
+        return (
+            tank.get("shield_steps", 0) == 0
+            and tank.get("shield_cooldown", 0) == 0
+        )
+    
+    def _get_dir_to(self, x1, y1, x2, y2):
+        dx = x2 - x1
+        dy = y2 - y1
+        if abs(dx) > abs(dy):
+            return DIR_RIGHT if dx > 0 else DIR_LEFT
+        else:
+            return DIR_DOWN if dy > 0 else DIR_UP
+
+
+class DodgerBot(BaseBot):
+    """
+    Actively dodges incoming bullets, counter-attacks when safe.
+    Uses bullet danger detection to sidestep.
+    """
+    
+    def act(self, state, rng):
+        me = state['me']
+        enemy = state['enemy']
+        grid = state['grid']
+        bullets = state['bullets']
+        
+        # Check for incoming danger
+        danger_dir = self._check_bullet_danger(me, bullets, grid)
+        
+        if danger_dir is not None:
+            # Dodge: move perpendicular to the bullet
+            dodge_action = self._get_dodge_action(me, danger_dir, grid)
+            if dodge_action is not None:
+                return dodge_action
+        
+        # If safe and can shoot, take the shot
+        if self._can_hit_enemy(me, enemy, grid) and self._can_shoot(me):
+            return ACTION_SHOOT
+        
+        # Chase enemy
+        target_dir = self._get_dir_to(me['x'], me['y'], enemy['x'], enemy['y'])
+        
+        if me['dir'] == target_dir:
+            nx = me['x'] + DX[me['dir']]
+            ny = me['y'] + DY[me['dir']]
+            if 0 <= nx < GRID_SIZE and 0 <= ny < GRID_SIZE and grid[ny, nx] == 0:
+                return ACTION_MOVE_FORWARD
+        else:
+            diff = (target_dir - me['dir']) % 4
+            if diff == 1:
+                return ACTION_TURN_RIGHT
+            else:
+                return ACTION_TURN_LEFT
+        
+        return ACTION_DO_NOTHING
+    
+    def _check_bullet_danger(self, me, bullets, grid):
+        """Check if any bullet is heading toward us. Return direction of danger."""
+        mx, my = me['x'], me['y']
+        
+        for b in bullets:
+            if b.get('owner') == 'enemy':  # Only fear player's bullets
+                continue
+            
+            bx, by = b['x'], b['y']
+            
+            # Check if bullet is on collision course
+            if b['dir'] == DIR_RIGHT and by == my and bx < mx:
+                # Bullet moving right toward us
+                blocked = False
+                for x in range(bx + 1, mx):
+                    if grid[my, x] == 1:
+                        blocked = True
+                        break
+                if not blocked and (mx - bx) <= 4:  # Close enough to worry
+                    return DIR_LEFT  # Danger from left
+                    
+            elif b['dir'] == DIR_LEFT and by == my and bx > mx:
+                blocked = False
+                for x in range(mx + 1, bx):
+                    if grid[my, x] == 1:
+                        blocked = True
+                        break
+                if not blocked and (bx - mx) <= 4:
+                    return DIR_RIGHT
+                    
+            elif b['dir'] == DIR_DOWN and bx == mx and by < my:
+                blocked = False
+                for y in range(by + 1, my):
+                    if grid[y, mx] == 1:
+                        blocked = True
+                        break
+                if not blocked and (my - by) <= 4:
+                    return DIR_UP
+                    
+            elif b['dir'] == DIR_UP and bx == mx and by > my:
+                blocked = False
+                for y in range(my + 1, by):
+                    if grid[y, mx] == 1:
+                        blocked = True
+                        break
+                if not blocked and (by - my) <= 4:
+                    return DIR_DOWN
+        
+        return None
+    
+    def _get_dodge_action(self, me, danger_dir, grid):
+        """Get action to dodge a bullet coming from danger_dir."""
+        # Move perpendicular to the danger
+        if danger_dir in [DIR_LEFT, DIR_RIGHT]:
+            # Danger from side, move up or down
+            for try_dir in [DIR_UP, DIR_DOWN]:
+                nx = me['x'] + DX[try_dir]
+                ny = me['y'] + DY[try_dir]
+                if 0 <= nx < GRID_SIZE and 0 <= ny < GRID_SIZE and grid[ny, nx] == 0:
+                    if me['dir'] == try_dir:
+                        return ACTION_MOVE_FORWARD
+                    # Turn toward escape direction
+                    diff = (try_dir - me['dir']) % 4
+                    if diff == 1:
+                        return ACTION_TURN_RIGHT
+                    elif diff == 3:
+                        return ACTION_TURN_LEFT
+        else:
+            # Danger from up/down, move left or right
+            for try_dir in [DIR_LEFT, DIR_RIGHT]:
+                nx = me['x'] + DX[try_dir]
+                ny = me['y'] + DY[try_dir]
+                if 0 <= nx < GRID_SIZE and 0 <= ny < GRID_SIZE and grid[ny, nx] == 0:
+                    if me['dir'] == try_dir:
+                        return ACTION_MOVE_FORWARD
+                    diff = (try_dir - me['dir']) % 4
+                    if diff == 1:
+                        return ACTION_TURN_RIGHT
+                    elif diff == 3:
+                        return ACTION_TURN_LEFT
+        
+        return None
+    
+    def _can_hit_enemy(self, me, enemy, grid):
+        if me['dir'] == DIR_UP:
+            if me['x'] == enemy['x'] and me['y'] > enemy['y']:
+                for y in range(enemy['y'] + 1, me['y']):
+                    if grid[y, me['x']] == 1:
+                        return False
+                return True
+        elif me['dir'] == DIR_DOWN:
+            if me['x'] == enemy['x'] and me['y'] < enemy['y']:
+                for y in range(me['y'] + 1, enemy['y']):
+                    if grid[y, me['x']] == 1:
+                        return False
+                return True
+        elif me['dir'] == DIR_LEFT:
+            if me['y'] == enemy['y'] and me['x'] > enemy['x']:
+                for x in range(enemy['x'] + 1, me['x']):
+                    if grid[me['y'], x] == 1:
+                        return False
+                return True
+        elif me['dir'] == DIR_RIGHT:
+            if me['y'] == enemy['y'] and me['x'] < enemy['x']:
+                for x in range(me['x'] + 1, enemy['x']):
+                    if grid[me['y'], x] == 1:
+                        return False
+                return True
+        return False
+    
+    def _can_shoot(self, tank):
+        return (
+            tank.get("cooldown", 0) == 0
+            and tank.get("ammo", 0) > 0
+            and tank.get("reload", 0) == 0
+        )
+    
+    def _get_dir_to(self, x1, y1, x2, y2):
+        dx = x2 - x1
+        dy = y2 - y1
+        if abs(dx) > abs(dy):
+            return DIR_RIGHT if dx > 0 else DIR_LEFT
+        else:
+            return DIR_DOWN if dy > 0 else DIR_UP
+
+
 class SelfPlayBot(BaseBot):
     """
     Bot that uses a trained agent's policy.
